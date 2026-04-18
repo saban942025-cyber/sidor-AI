@@ -30,7 +30,14 @@ import {
   Construction,
   Package,
   Layers,
-  Sparkles
+  Sparkles,
+  Menu,
+  MapPin,
+  Home,
+  BarChart3,
+  Archive,
+  Smartphone,
+  Navigation
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -66,7 +73,8 @@ import {
   getDocFromServer,
   setDoc,
   writeBatch,
-  Timestamp 
+  Timestamp,
+  limit
 } from 'firebase/firestore';
 import { 
   onAuthStateChanged, 
@@ -90,12 +98,24 @@ interface Order {
   status: OrderStatus;
   createdAt: number;
   orderIndex: number;
+  priority: 'normal' | 'high';
   orderNumber?: string;
+  deliveryDate?: string;
+  deliveryTime?: string;
   predictedETA?: string;
   predictedMinutes?: number;
   completedAt?: number;
   deadline?: number;
   notes?: string;
+}
+
+interface AuditLog {
+  id: string;
+  userId: string;
+  userEmail: string;
+  timestamp: number;
+  action: string;
+  changes?: any;
 }
 
 interface Message {
@@ -128,6 +148,7 @@ const INITIAL_ORDERS: Order[] = [
     status: 'בביצוע',
     createdAt: Date.now() - 1000 * 60 * 15, // 15 mins ago
     orderIndex: Date.now() - 1000 * 60 * 15,
+    priority: 'normal',
   },
   {
     id: '2',
@@ -138,6 +159,7 @@ const INITIAL_ORDERS: Order[] = [
     status: 'ממתין',
     createdAt: Date.now() - 1000 * 60 * 5, // 5 mins ago
     orderIndex: Date.now() - 1000 * 60 * 5,
+    priority: 'normal',
   }
 ];
 
@@ -154,6 +176,8 @@ export default function App() {
   const [filterWarehouse, setFilterWarehouse] = useState<WarehouseLocation | 'הכל'>('הכל');
   const [filterStatus, setFilterStatus] = useState<OrderStatus | 'הכל'>('הכל');
   const [filterOrderNumber, setFilterOrderNumber] = useState('');
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -161,10 +185,21 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  const sendBrowserNotification = (title: string, body: string) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, { body, icon: '/favicon.ico' });
+    }
+  };
+
   // Auth & Connection Testing
   useEffect(() => {
     (window as any).showGlobalToast = showToast;
     
+    // Request notification permission
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
     const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
@@ -196,7 +231,8 @@ export default function App() {
           id: doc.id,
           ...data,
           // Fallback for existing documents
-          orderIndex: data.orderIndex ?? data.createdAt ?? Date.now()
+          orderIndex: data.orderIndex ?? data.createdAt ?? Date.now(),
+          priority: data.priority ?? 'normal'
         };
       }) as Order[];
       
@@ -210,7 +246,7 @@ export default function App() {
       onSnapshot(fallbackQ, (fallbackSnapshot) => {
         const fallbackData = fallbackSnapshot.docs.map(doc => {
           const data = doc.data();
-          return { id: doc.id, ...data, orderIndex: data.orderIndex ?? data.createdAt ?? Date.now() };
+          return { id: doc.id, ...data, orderIndex: data.orderIndex ?? data.createdAt ?? Date.now(), priority: data.priority ?? 'normal' };
         }) as Order[];
         setOrders([...fallbackData].sort((a, b) => b.orderIndex - a.orderIndex));
       });
@@ -228,6 +264,44 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
+
+  // Proactive Notifications Watcher
+  const alertedOrdersRef = useRef<Set<string>>(new Set());
+  
+  useEffect(() => {
+    const checkOrders = () => {
+      orders.forEach(order => {
+        if (order.status === 'הושלם' || order.status === 'בוטל') return;
+
+        const alertKey = `${order.id}-${order.status}`;
+        
+        // 1. High Priority Alert
+        if (order.priority === 'high' && !alertedOrdersRef.current.has(`${order.id}-priority`)) {
+          playAlert();
+          const msg = `⚠️ הזמנה דחופה: ${order.client}`;
+          showToast(msg);
+          sendBrowserNotification('ח. סבן - הזמנה דחופה 🏗️', msg);
+          alertedOrdersRef.current.add(`${order.id}-priority`);
+        }
+
+        // 2. Close to Arrival / Delay Alert (if > 80% time passed)
+        if (order.predictedMinutes && !alertedOrdersRef.current.has(`${order.id}-delay`)) {
+          const elapsedMin = (Date.now() - order.createdAt) / 60000;
+          if (elapsedMin > order.predictedMinutes * 0.85) {
+            playAlert();
+            const msg = `⏰ קרבה ליעד: ${order.client} (עברו ${Math.round(elapsedMin)} דק')`;
+            showToast(msg);
+            sendBrowserNotification('ח. סבן - התראת הגעה 🚛', msg);
+            alertedOrdersRef.current.add(`${order.id}-delay`);
+          }
+        }
+      });
+    };
+
+    const interval = setInterval(checkOrders, 30000); // Check every 30s
+    checkOrders(); // Initial check
+    return () => clearInterval(interval);
+  }, [orders]);
 
   const updateStatusTheme = async (status: OrderStatus, theme: StatusTheme) => {
     if (!user) return;
@@ -253,14 +327,60 @@ export default function App() {
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedOrderID, setSelectedOrderID] = useState<string | null>(null);
+  const [selectedOrderLogs, setSelectedOrderLogs] = useState<AuditLog[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [isEditingSelectedOrder, setIsEditingSelectedOrder] = useState(false);
+  const [editOrderForm, setEditOrderForm] = useState<Partial<Order>>({});
   const [isDeletingOrderID, setIsDeletingOrderID] = useState<string | null>(null);
   const selectedOrder = useMemo(() => orders.find(o => o.id === selectedOrderID), [orders, selectedOrderID]);
   
+  const addAuditLog = async (orderId: string, action: string, changes?: any) => {
+    if (!user) return;
+    try {
+      await addDoc(collection(db, 'orders', orderId, 'auditLogs'), {
+        userId: user.uid,
+        userEmail: user.email || 'unknown',
+        timestamp: Date.now(),
+        action,
+        changes: changes || null
+      });
+    } catch (e) {
+      console.error("Failed to add audit log:", e);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedOrderID || !user) {
+      setSelectedOrderLogs([]);
+      return;
+    }
+
+    setIsLoadingLogs(true);
+    const q = query(
+      collection(db, 'orders', selectedOrderID, 'auditLogs'),
+      orderBy('timestamp', 'desc'),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AuditLog));
+      setSelectedOrderLogs(logs);
+      setIsLoadingLogs(false);
+    }, (error) => {
+      console.error("Logs fetch failed:", error);
+      setIsLoadingLogs(false);
+    });
+
+    return () => unsubscribe();
+  }, [selectedOrderID, user]);
   const [manualOrder, setManualOrder] = useState<Partial<Order>>({
     driver: 'חכמת',
     warehouse: 'התלמיד',
     status: 'ממתין',
+    priority: 'normal',
     orderNumber: '',
+    deliveryDate: '',
+    deliveryTime: '',
     notes: ''
   });
 
@@ -277,20 +397,34 @@ export default function App() {
     
     setIsSubmitting(true);
     try {
-      await addDoc(collection(db, 'orders'), {
+      const orderRef = await addDoc(collection(db, 'orders'), {
         driver: manualOrder.driver,
         client: manualOrder.client,
         orderNumber: manualOrder.orderNumber || '',
         deliveryType: manualOrder.deliveryType,
         warehouse: manualOrder.warehouse,
+        deliveryDate: manualOrder.deliveryDate || '',
+        deliveryTime: manualOrder.deliveryTime || '',
+        priority: manualOrder.priority || 'normal',
         notes: manualOrder.notes || '',
         status: 'ממתין',
         createdAt: Date.now(),
         updatedAt: Date.now(),
         orderIndex: Date.now()
       });
+      
+      await addAuditLog(orderRef.id, 'הזמנה נוצרה ידנית');
+      
       setIsManualModalOpen(false);
-      setManualOrder({ driver: 'חכמת', warehouse: 'התלמיד', status: 'ממתין', orderNumber: '', notes: '' });
+      setManualOrder({ 
+        driver: 'חכמת', 
+        warehouse: 'התלמיד', 
+        status: 'ממתין', 
+        orderNumber: '', 
+        deliveryDate: '',
+        deliveryTime: '',
+        notes: '' 
+      });
       playAlert();
     } catch (error) {
       console.error("Failed to add order:", error);
@@ -333,6 +467,7 @@ export default function App() {
       }
       
       await updateDoc(doc(db, 'orders', id), updateData);
+      await addAuditLog(id, 'שינוי סטטוס', { from: order.status, to: nextStatus });
     } catch (error) {
       console.error("Update failed:", error);
     }
@@ -349,6 +484,50 @@ export default function App() {
       console.error("Delete failed:", error);
       alert("אח שלי, הייתה בעיה במחיקה.");
     }
+  };
+
+  const handleEditClick = () => {
+    if (!selectedOrder) return;
+    setEditOrderForm({ ...selectedOrder });
+    setIsEditingSelectedOrder(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!selectedOrder || !user) return;
+    setIsSubmitting(true);
+    try {
+      const changes: any = {};
+      Object.keys(editOrderForm).forEach(key => {
+        // @ts-ignore
+        if (editOrderForm[key] !== selectedOrder[key]) {
+          // @ts-ignore
+          changes[key] = { from: selectedOrder[key], to: editOrderForm[key] };
+        }
+      });
+
+      await updateDoc(doc(db, 'orders', selectedOrder.id), {
+        ...editOrderForm,
+        updatedAt: Date.now()
+      });
+      
+      if (Object.keys(changes).length > 0) {
+        await addAuditLog(selectedOrder.id, 'עדכון פרטי הזמנה', changes);
+      }
+      
+      setIsEditingSelectedOrder(false);
+      showToast('הזמנה עודכנה בהצלחה! ✨');
+    } catch (error) {
+      console.error("Edit failed:", error);
+      alert("אח שלי, הייתה בעיה בעדכון.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const closeOrderModal = () => {
+    setSelectedOrderID(null);
+    setIsEditingSelectedOrder(false);
+    setEditOrderForm({});
   };
 
   // WhatsApp Message Generator
@@ -383,6 +562,38 @@ export default function App() {
     });
   }, [orders, filterDriver, filterWarehouse, filterStatus, filterOrderNumber]);
 
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, []);
+
+  const installApp = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
+      setDeferredPrompt(null);
+    }
+  };
+
+  const getCurrentLocation = (): Promise<string> => {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        resolve("לא נתמך בדפדפן");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve(`${pos.coords.latitude}, ${pos.coords.longitude}`),
+        () => resolve("נדחה ע\"י המשתמש"),
+        { timeout: 5000 }
+      );
+    });
+  };
+
   // Sound Notification Function
   const playAlert = () => {
     const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3'); // Professional notification sound
@@ -405,8 +616,8 @@ export default function App() {
 
     try {
       // Import dynamic to avoid build issues
-      const { processRamiMessage } = await import('./lib/gemini');
-      const response = await processRamiMessage(inputValue);
+      const { processNoaMessage } = await import('./lib/gemini');
+      const response = await processNoaMessage(inputValue);
       
       const assistantMsg: Message = {
         id: (Date.now() + 1).toString(),
@@ -430,17 +641,23 @@ export default function App() {
           return;
         }
 
-        await addDoc(collection(db, 'orders'), {
+        const orderRef = await addDoc(collection(db, 'orders'), {
           driver: response.data.driver || 'חכמת',
           client: response.data.client || 'לקוח חדש',
           deliveryType: response.data.deliveryType || 'הובלה רגילה',
           warehouse: response.data.warehouse || 'התלמיד',
           orderNumber: response.data.orderNumber || '',
+          deliveryDate: response.data.deliveryDate || '',
+          deliveryTime: response.data.deliveryTime || '',
+          priority: response.data.priority || 'normal',
           status: 'ממתין',
           createdAt: Date.now(),
           updatedAt: Date.now(),
           orderIndex: Date.now()
         });
+        
+        await addAuditLog(orderRef.id, 'הזמנה נוצרה דרך נועה AI');
+        
         playAlert();
         showToast(`ההזמנה עבור ${response.data.client || 'לקוח חדש'} נוספה בהצלחה! ✅`);
       }
@@ -604,10 +821,10 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={() => setIsChatOpen(false)} className="p-2 hover:bg-slate-100 rounded-lg md:hidden">
+                  <button onClick={() => setIsChatOpen(false)} className="p-2 hover:bg-slate-100 rounded-lg">
                     <X size={20} />
                   </button>
-                  <div className="text-2xl">🤖</div>
+                  <div className="text-2xl">👩‍💼</div>
                 </div>
               </div>
 
@@ -635,7 +852,7 @@ export default function App() {
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                    placeholder="כתוב הודעה לרמי..."
+                    placeholder="דברו עם נועה..."
                     className="flex-1 bg-white border border-surface-border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/10 focus:border-primary transition-all text-right"
                     dir="rtl"
                   />
@@ -656,20 +873,88 @@ export default function App() {
           )}
         </AnimatePresence>
 
+        {/* Side Drawer (Mobile Navigation) */}
+        <AnimatePresence>
+          {isDrawerOpen && (
+            <>
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setIsDrawerOpen(false)}
+                className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[150]"
+              />
+              <motion.aside 
+                initial={{ x: '100%' }}
+                animate={{ x: 0 }}
+                exit={{ x: '100%' }}
+                transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+                className="fixed top-0 right-0 h-full w-[280px] bg-white z-[160] shadow-2xl flex flex-col p-6"
+                dir="rtl"
+              >
+                <div className="flex justify-between items-center mb-10">
+                  <div className="text-2xl font-black text-primary">נועה לוגיסטיקה</div>
+                  <button onClick={() => setIsDrawerOpen(false)} className="p-2 hover:bg-slate-100 rounded-lg">
+                    <X size={24} />
+                  </button>
+                </div>
+
+                <nav className="flex flex-col gap-2">
+                  <DrawerItem icon={<Home size={20}/>} label="לוח הזמנות" active onClick={() => { setIsDrawerOpen(false); setIsChatOpen(false); }} />
+                  <DrawerItem icon={<MessageCircle size={20}/>} label="דברו עם נועה" onClick={() => { setIsDrawerOpen(false); setIsChatOpen(true); }} />
+                  <DrawerItem icon={<Archive size={20}/>} label="דוח בוקר" onClick={() => { setIsDrawerOpen(false); showToast('דוח בוקר בייצור...'); }} />
+                  <DrawerItem icon={<BarChart3 size={20}/>} label="סטטוס מלאי" onClick={() => { setIsDrawerOpen(false); showToast('בודקת מלאי מול המחסנים...'); }} />
+                  {deferredPrompt && (
+                    <DrawerItem icon={<Smartphone size={20}/>} label="התקן אפליקציה" onClick={() => { setIsDrawerOpen(false); installApp(); }} />
+                  )}
+                </nav>
+
+                <div className="mt-auto pt-6 border-t border-slate-100">
+                  {user ? (
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold">
+                        {user.email?.[0].toUpperCase()}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-bold text-text-dark truncate">{user.email}</p>
+                        <button onClick={logout} className="text-xs text-red-500 font-bold hover:underline">התנתק</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={login} className="w-full py-3 bg-primary text-white rounded-xl font-bold flex items-center justify-center gap-2">
+                      <LogIn size={18} />
+                      <span>התחבר למערכת</span>
+                    </button>
+                  )}
+                </div>
+              </motion.aside>
+            </>
+          )}
+        </AnimatePresence>
+
         {/* Dashboard Pane */}
-        <div className="flex-1 overflow-y-auto p-6 md:p-8 flex flex-col gap-8">
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 flex flex-col gap-6">
           
-          <div className="flex justify-between items-center bg-white/50 backdrop-blur-sm p-4 rounded-2xl border border-slate-100 shadow-sm sticky top-0 z-10">
-            <div>
-              <p className="text-[11px] uppercase tracking-[2px] text-text-light font-black mb-1">ח. סבן לוגיסטיקה</p>
-              <h1 className="text-2xl font-black text-text-dark tracking-tight">לוח הזמנות יומי - סטטוס ויזואלי</h1>
+          <div className="flex justify-between items-center bg-white/80 backdrop-blur-md p-4 rounded-2xl border border-slate-200 shadow-lg sticky top-0 z-40">
+            <div className="flex items-center gap-3">
+              <button 
+                onClick={() => setIsDrawerOpen(true)}
+                className="p-2 hover:bg-slate-100 rounded-xl lg:hidden text-primary"
+              >
+                <Menu size={24} />
+              </button>
+              <div>
+                <p className="text-[10px] uppercase tracking-[1px] text-text-light font-black mb-0.5">ח. סבן לוגיסטיקה</p>
+                <h1 className="text-lg md:text-2xl font-black text-text-dark tracking-tight">סידור עבודה - נועה</h1>
+              </div>
             </div>
             <button 
               onClick={() => setIsManualModalOpen(true)}
-              className="bg-accent text-white px-6 py-3 rounded-xl font-black text-sm hover:translate-y-[-2px] transition-all shadow-lg shadow-accent/20 active:translate-y-0 flex items-center gap-2"
+              className="bg-accent text-white w-10 h-10 md:w-auto md:px-6 md:py-3 rounded-xl font-black text-sm hover:translate-y-[-2px] transition-all shadow-lg shadow-accent/20 active:translate-y-0 flex items-center justify-center md:gap-2"
+              title="הזמנה ידנית"
             >
-              <Plus size={18} />
-              <span>הזמנה ידנית</span>
+              <Plus size={20} />
+              <span className="hidden md:inline">הזמנה ידנית</span>
             </button>
           </div>
 
@@ -748,10 +1033,14 @@ export default function App() {
                       key={order.id}
                       order={order} 
                       onToggle={() => toggleOrderStatus(order.id)} 
-                      onClick={() => setSelectedOrderID(order.id)}
+                      onClick={() => {
+                        setIsEditingSelectedOrder(false);
+                        setSelectedOrderID(order.id);
+                      }}
                       statusThemes={statusThemes}
                       orders={orders}
                       user={user}
+                      onShare={generateWhatsAppMessage}
                     />
                   ))}
                 </div>
@@ -871,6 +1160,26 @@ export default function App() {
                     onChange={e => setManualOrder({...manualOrder, deliveryType: e.target.value})}
                   />
                 </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">תאריך אספקה</label>
+                    <input 
+                      type="date"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500/20 shadow-sm"
+                      value={manualOrder.deliveryDate || ''}
+                      onChange={e => setManualOrder({...manualOrder, deliveryDate: e.target.value})}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">שעת אספקה</label>
+                    <input 
+                      type="time"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500/20 shadow-sm"
+                      value={manualOrder.deliveryTime || ''}
+                      onChange={e => setManualOrder({...manualOrder, deliveryTime: e.target.value})}
+                    />
+                  </div>
+                </div>
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-400 uppercase">הערות</label>
                   <textarea 
@@ -908,7 +1217,7 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setSelectedOrderID(null)}
+              onClick={closeOrderModal}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
             />
             <motion.div 
@@ -921,14 +1230,23 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2 mb-2">
                     <span className="bg-primary text-white text-[10px] font-black px-2 py-1 rounded uppercase tracking-widest">
-                      פרטי הזמנה
+                      {isEditingSelectedOrder ? 'עריכת הזמנה' : 'פרטי הזמנה'}
                     </span>
                     <span className="text-text-light text-xs font-mono font-bold">#{selectedOrder.id.slice(-6)}</span>
                   </div>
-                  <h2 className="text-3xl font-black text-text-dark tracking-tight leading-none">{selectedOrder.client}</h2>
+                  {isEditingSelectedOrder ? (
+                    <input 
+                      type="text"
+                      value={editOrderForm.client || ''}
+                      onChange={e => setEditOrderForm({...editOrderForm, client: e.target.value})}
+                      className="text-3xl font-black text-text-dark tracking-tight leading-none bg-white border border-slate-200 rounded-lg px-2 py-1 w-full"
+                    />
+                  ) : (
+                    <h2 className="text-3xl font-black text-text-dark tracking-tight leading-none">{selectedOrder.client}</h2>
+                  )}
                 </div>
                 <div className="flex gap-2">
-                  {user && (
+                  {user && !isEditingSelectedOrder && (
                     <button 
                       onClick={() => setIsDeletingOrderID(selectedOrder.id)}
                       className="p-2 hover:bg-red-50 text-red-200 hover:text-red-500 rounded-full transition-all"
@@ -937,7 +1255,7 @@ export default function App() {
                       <Trash2 size={24} />
                     </button>
                   )}
-                  <button onClick={() => setSelectedOrderID(null)} className="p-2 hover:bg-slate-200 rounded-full transition-colors">
+                  <button onClick={closeOrderModal} className="p-2 hover:bg-slate-200 rounded-full transition-colors">
                     <X size={24} />
                   </button>
                 </div>
@@ -945,9 +1263,96 @@ export default function App() {
 
               <div className="p-8 space-y-6">
                 <div className="grid grid-cols-2 gap-6">
-                  <DetailItem icon={<User size={18} className="text-primary" />} label="נהג" value={selectedOrder.driver} />
-                  <DetailItem icon={<Warehouse size={18} className="text-primary" />} label="מחסן" value={selectedOrder.warehouse} />
-                  <DetailItem icon={<Truck size={18} className="text-primary" />} label="סוג הובלה" value={selectedOrder.deliveryType} />
+                  {isEditingSelectedOrder ? (
+                    <>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">נהג</label>
+                        <select 
+                          value={editOrderForm.driver || 'חכמת'}
+                          onChange={e => setEditOrderForm({...editOrderForm, driver: e.target.value as Driver})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black"
+                        >
+                          <option value="חכמת">חכמת</option>
+                          <option value="עלי">עלי</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">מחסן</label>
+                        <select 
+                          value={editOrderForm.warehouse || 'התלמיד'}
+                          onChange={e => setEditOrderForm({...editOrderForm, warehouse: e.target.value as WarehouseLocation})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black"
+                        >
+                          <option value="התלמיד">התלמיד</option>
+                          <option value="החרש">החרש</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">סוג הובלה</label>
+                        <input 
+                          type="text"
+                          value={editOrderForm.deliveryType || ''}
+                          onChange={e => setEditOrderForm({...editOrderForm, deliveryType: e.target.value})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">מס' הזמנה</label>
+                        <input 
+                          type="text"
+                          value={editOrderForm.orderNumber || ''}
+                          onChange={e => setEditOrderForm({...editOrderForm, orderNumber: e.target.value})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">תאריך אספקה</label>
+                        <input 
+                          type="date"
+                          value={editOrderForm.deliveryDate || ''}
+                          onChange={e => setEditOrderForm({...editOrderForm, deliveryDate: e.target.value})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">שעת אספקה</label>
+                        <input 
+                          type="time"
+                          value={editOrderForm.deliveryTime || ''}
+                          onChange={e => setEditOrderForm({...editOrderForm, deliveryTime: e.target.value})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black"
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <DetailItem icon={<User size={18} className="text-primary" />} label="נהג" value={selectedOrder.driver} />
+                      <DetailItem icon={<Warehouse size={18} className="text-primary" />} label="מחסן" value={selectedOrder.warehouse} />
+                      <DetailItem icon={<Truck size={18} className="text-primary" />} label="סוג הובלה" value={selectedOrder.deliveryType} />
+                      <DetailItem icon={<Calendar size={18} className="text-primary" />} label="תאריך" value={selectedOrder.deliveryDate || 'לא צוין'} />
+                      <DetailItem icon={<Clock size={18} className="text-primary" />} label="שעה" value={selectedOrder.deliveryTime || 'לא צוין'} />
+                      <div className="space-y-1">
+                        <p className="text-[10px] font-black text-text-light uppercase tracking-widest flex items-center gap-1.5">
+                          <AlertCircle size={18} className={selectedOrder.priority === 'high' ? 'text-red-500' : 'text-slate-400'} />
+                          עדיפות
+                        </p>
+                        <button 
+                          onClick={async () => {
+                            const newPriority = selectedOrder.priority === 'high' ? 'normal' : 'high';
+                            await updateDoc(doc(db, 'orders', selectedOrder.id), { priority: newPriority });
+                            await addAuditLog(selectedOrder.id, 'שינוי עדיפות', { from: selectedOrder.priority, to: newPriority });
+                          }}
+                          className={`text-sm font-black px-3 py-1 rounded-lg transition-all ${
+                            selectedOrder.priority === 'high' 
+                            ? 'bg-red-100 text-red-700 border border-red-200' 
+                            : 'bg-slate-100 text-slate-700 border border-slate-200'
+                          }`}
+                        >
+                          {selectedOrder.priority === 'high' ? 'דחוף 🔥' : 'רגיל'}
+                        </button>
+                      </div>
+                    </>
+                  )}
                   <DetailItem icon={<Clock size={18} className="text-primary" />} label="סטטוס" value={statusThemes[selectedOrder.status].label} />
                 </div>
 
@@ -958,27 +1363,92 @@ export default function App() {
                     <span>נוצר ב: {new Date(selectedOrder.createdAt).toLocaleString('he-IL')}</span>
                   </div>
                   
-                  {selectedOrder.notes && (
-                    <div className="bg-amber-50 border border-amber-100 p-4 rounded-xl">
-                      <p className="text-xs font-black text-amber-800 uppercase mb-1">הערות:</p>
-                      <p className="text-sm text-amber-900 font-medium">{selectedOrder.notes}</p>
-                    </div>
-                  )}
+                    {isEditingSelectedOrder ? (
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-text-light uppercase tracking-widest">הערות</label>
+                        <textarea 
+                          value={editOrderForm.notes || ''}
+                          onChange={e => setEditOrderForm({...editOrderForm, notes: e.target.value})}
+                          className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm font-black resize-none"
+                          rows={3}
+                        />
+                      </div>
+                    ) : (
+                      selectedOrder.notes && (
+                        <div className="bg-amber-50 border border-amber-100 p-4 rounded-xl">
+                          <p className="text-xs font-black text-amber-800 uppercase mb-1">הערות:</p>
+                          <p className="text-sm text-amber-900 font-medium">{selectedOrder.notes}</p>
+                        </div>
+                      )
+                    )}
+
+                    {/* Audit Log Section */}
+                    {!isEditingSelectedOrder && (
+                      <div className="pt-6 border-t border-slate-100 mt-6">
+                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+                          <Clock size={14} />
+                          היסטוריית שינויים (Audit Log)
+                        </h3>
+                        <div className="space-y-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                          {isLoadingLogs ? (
+                            <p className="text-center text-[10px] text-slate-400 py-2 italic font-bold">טוען היסטוריה...</p>
+                          ) : selectedOrderLogs.length === 0 ? (
+                            <p className="text-center text-[10px] text-slate-400 py-2 italic font-bold">אין רישומי היסטוריה להזמנה זו.</p>
+                          ) : (
+                            selectedOrderLogs.map(log => (
+                              <div key={log.id} className="text-[11px] p-2.5 bg-slate-50 rounded-xl border border-slate-100">
+                                <div className="flex justify-between items-start mb-1 gap-4">
+                                  <span className="font-extrabold text-primary truncate max-w-[150px]">{log.action}</span>
+                                  <span className="text-slate-400 font-mono italic shrink-0">
+                                    {new Date(log.timestamp).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+                                <div className="text-slate-500 font-bold mb-1 flex justify-between">
+                                  <span>עודכן ע"י: {log.userEmail.split('@')[0]}</span>
+                                  <span className="text-[9px] text-slate-300 font-mono">{new Date(log.timestamp).toLocaleDateString('he-IL')}</span>
+                                </div>
+                                {log.changes && (
+                                  <div className="mt-2 text-[10px] space-y-0.5 border-t border-slate-200 pt-2 font-bold">
+                                    {Object.entries(log.changes).map(([key, change]: [string, any]) => (
+                                      <div key={key} className="flex gap-2 items-center flex-wrap">
+                                        <span className="text-slate-400 shrink-0">{key}:</span>
+                                        <span className="text-red-400 line-through decoration-red-400/30 truncate max-w-[80px]">{String(change.from || '---')}</span>
+                                        <span className="text-slate-400">←</span>
+                                        <span className="text-emerald-500 truncate max-w-[100px]">{String(change.to || '---')}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                   <div className="grid grid-cols-2 gap-3">
                     <button 
-                      className="flex-1 py-4 bg-primary text-white rounded-2xl font-black text-sm shadow-lg shadow-primary/20 hover:bg-blue-900 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
-                      onClick={() => alert('עריכה תיושם בקרוב!')}
-                      disabled={!user}
+                      className={`flex-1 py-4 text-white rounded-2xl font-black text-sm shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 ${isEditingSelectedOrder ? 'bg-emerald-600 shadow-emerald-600/20 hover:bg-emerald-700' : 'bg-primary shadow-primary/20 hover:bg-blue-900'}`}
+                      onClick={isEditingSelectedOrder ? handleSaveEdit : handleEditClick}
+                      disabled={!user || isSubmitting}
                     >
-                      <Plus size={18} />
-                      ערוך הזמנה
+                      {isEditingSelectedOrder ? (
+                        <>
+                          <CheckCircle2 size={18} />
+                          שמור שינויים
+                        </>
+                      ) : (
+                        <>
+                          <Plus size={18} />
+                          ערוך הזמנה
+                        </>
+                      )}
                     </button>
                     <button 
                       className="flex-1 py-4 bg-white border-2 border-surface-border text-text-dark rounded-2xl font-black text-sm hover:bg-slate-50 transition-all active:scale-95"
-                      onClick={() => setSelectedOrderID(null)}
+                      onClick={isEditingSelectedOrder ? () => setIsEditingSelectedOrder(false) : closeOrderModal}
                     >
-                      סגור
+                      {isEditingSelectedOrder ? 'ביטול' : 'סגור'}
                     </button>
                   </div>
                 </div>
@@ -1125,6 +1595,18 @@ export default function App() {
 
 // --- Sub-components ---
 
+const DrawerItem = memo(({ icon, label, onClick, active = false }: { icon: any, label: string, onClick: () => void, active?: boolean }) => (
+  <button 
+    onClick={onClick}
+    className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-2xl font-black text-sm transition-all ${
+      active ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'text-slate-600 hover:bg-slate-100 hover:text-primary active:scale-95'
+    }`}
+  >
+    <div className={active ? 'text-white' : 'text-slate-400'}>{icon}</div>
+    <span>{label}</span>
+  </button>
+));
+
 const DetailItem = memo(({ icon, label, value }: { icon: any, label: string, value: string }) => {
   return (
     <div className="space-y-1">
@@ -1137,13 +1619,14 @@ const DetailItem = memo(({ icon, label, value }: { icon: any, label: string, val
   );
 });
 
-const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes, orders, user }: { 
+const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes, orders, user, onShare }: { 
   order: Order; 
   onToggle: () => void; 
   onClick: () => void; 
   statusThemes: Record<OrderStatus, StatusTheme>, 
   orders: Order[],
-  user: any
+  user: any,
+  onShare: () => void
 }) => {
   const {
     attributes,
@@ -1171,19 +1654,21 @@ const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes, orders
         allOrders={orders}
         user={user}
         dragProps={{ ...attributes, ...listeners }}
+        onShare={onShare}
       />
     </div>
   );
 });
 
-const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, user, dragProps }: { 
+const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, user, dragProps, onShare }: { 
   order: Order; 
   onToggle: () => void; 
   onClick: () => void; 
   statusThemes: Record<OrderStatus, StatusTheme>; 
   allOrders: Order[];
   user: any;
-  dragProps?: any 
+  dragProps?: any;
+  onShare: () => void;
 }) => {
   const [timeLeft, setTimeLeft] = useState('00:00:00');
   const [isPredicting, setIsPredicting] = useState(false);
@@ -1203,10 +1688,21 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, use
     return () => clearInterval(timer);
   }, [order.createdAt]);
 
-  const handleSmartPredict = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleSmartPredict = async (e?: React.MouseEvent) => {
+    e?.stopPropagation();
     setIsPredicting(true);
     try {
+      let location = "לא צוין";
+      if (navigator.geolocation) {
+        location = await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => resolve(`${pos.coords.latitude}, ${pos.coords.longitude}`),
+            () => resolve("נדחה"),
+            { timeout: 5000 }
+          );
+        });
+      }
+
       // Build historical context from last 5 completed orders for same warehouse/deliveryType
       const history = allOrders
         .filter(o => o.status === 'הושלם' && o.warehouse === order.warehouse && o.deliveryType === order.deliveryType && o.completedAt)
@@ -1214,12 +1710,12 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, use
         .slice(0, 5)
         .map(o => {
           const duration = Math.round(((o.completedAt || 0) - o.createdAt) / 60000);
-          return `- ${o.client}: ${duration} דקות (${new Date(o.createdAt).toLocaleDateString()})`;
+          return `- ${o.client}: ${duration} דקות`;
         })
         .join('\n');
 
       const { predictETA } = await import('./lib/gemini');
-      const result = await predictETA(order, history);
+      const result = await predictETA(order, location, history);
       
       setEtaPrediction(result.etaText);
       
@@ -1232,8 +1728,9 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, use
         });
       }
 
-      if (typeof (window as any).showGlobalToast === 'function') {
-        (window as any).showGlobalToast('התחזית עודכנה בהצלחה! ✨');
+      const showGlobalToast = (window as any).showGlobalToast;
+      if (typeof showGlobalToast === 'function') {
+        showGlobalToast('נועה: התחזית עודכנה! 📍');
       }
     } catch (error) {
       console.error("ETA Prediction Error:", error);
@@ -1263,43 +1760,56 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, use
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
       onClick={onClick}
-      className="bg-white rounded-2xl p-6 shadow-md border-t-4 relative overflow-hidden group hover:shadow-xl transition-all cursor-pointer active:scale-[0.98]"
-      style={{ borderTopColor: theme.color }}
+      className="bg-white rounded-[28px] p-5 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 relative overflow-hidden group hover:shadow-[0_20px_40px_rgb(0,0,0,0.08)] transition-all cursor-pointer active:scale-[0.98]"
     >
+      <div className="absolute top-0 right-0 w-1.5 h-full" style={{ backgroundColor: theme.color }} />
       <div className="flex justify-between items-center mb-4">
-        <div className="flex items-center gap-2">
-          <div {...dragProps} className="p-1 hover:bg-slate-100 rounded cursor-grab active:cursor-grabbing text-slate-300">
-            <GripVertical size={16} />
+        <div className="flex items-center gap-3">
+          <div {...dragProps} className="p-1 hover:bg-slate-100 rounded-lg cursor-grab active:cursor-grabbing text-slate-300">
+            <GripVertical size={20} />
           </div>
-          <h3 className="text-lg font-extrabold text-text-dark">{order.driver === 'חכמת' ? '🏗️ חכמת' : '🚛 עלי'}</h3>
+          <h3 className="text-xl font-black text-text-dark tracking-tight">{order.driver === 'חכמת' ? '🏗️ חכמת' : '🚛 עלי'}</h3>
+          {order.priority === 'high' && (
+            <motion.div 
+              animate={{ opacity: [1, 0.5, 1], scale: [1, 1.2, 1] }} 
+              transition={{ repeat: Infinity, duration: 1 }}
+              className="text-red-500"
+            >
+              <AlertCircle size={18} fill="currentColor" fillOpacity={0.2} />
+            </motion.div>
+          )}
         </div>
-        <span 
-          className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border"
-          style={{ backgroundColor: `${theme.color}1a`, color: theme.color, borderColor: `${theme.color}33` }}
-        >
-          {theme.label}
-        </span>
+        <div className="flex items-center gap-2">
+           <span className="text-[14px] font-black text-primary bg-primary/5 px-2 py-1 rounded-lg border border-primary/10">#{order.id.slice(-4).toUpperCase()}</span>
+           <span 
+            className="px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border"
+            style={{ backgroundColor: `${theme.color}1a`, color: theme.color, borderColor: `${theme.color}33` }}
+          >
+            {theme.label}
+          </span>
+        </div>
       </div>
 
       <div className="space-y-4">
-        <div className="p-4 bg-slate-50 rounded-xl border-r-4 relative flex items-center gap-4" style={{ borderRightColor: theme.color }}>
-          <div className="p-3 bg-white rounded-lg shadow-sm shrink-0 border border-slate-100">
+        <div className="p-4 bg-slate-50/50 rounded-2xl relative flex items-center gap-4 border border-slate-100">
+          <div className="p-3 bg-white rounded-xl shadow-sm shrink-0 border border-slate-100">
             {getDeliveryIcon()}
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
-              <div className="font-extrabold text-lg tracking-tight truncate">{order.client}</div>
-              {order.orderNumber && (
-                <div className="bg-slate-200 text-slate-700 text-[10px] font-black px-1.5 py-0.5 rounded border border-slate-300">
-                  #{order.orderNumber}
-                </div>
-              )}
+              <div className="font-black text-lg tracking-tight truncate text-text-dark">{order.client}</div>
             </div>
-            <div className="text-xs text-text-light font-bold flex justify-between mt-1">
-              <span>{order.warehouse} | {order.deliveryType}</span>
+            <div className="text-xs text-text-light font-bold flex flex-wrap gap-2 items-center text-right" dir="rtl">
+              <span className="bg-slate-100 px-2 py-0.5 rounded-md">{order.warehouse}</span>
+              <span className="bg-slate-100 px-2 py-0.5 rounded-md">{order.deliveryType}</span>
+              {(order.deliveryDate || order.deliveryTime) && (
+                <span className="text-primary flex items-center gap-1 bg-primary/5 px-2 py-0.5 rounded-md">
+                  {order.deliveryDate && <span>📅 {order.deliveryDate}</span>}
+                  {order.deliveryTime && <span>⏰ {order.deliveryTime}</span>}
+                </span>
+              )}
               <div 
-                className="flex items-center gap-1 px-2 py-0.5 rounded font-mono font-bold text-[11px]"
-                style={{ backgroundColor: `${theme.color}1a`, color: theme.color }}
+                className="flex items-center gap-1 px-2 py-0.5 rounded font-mono font-bold text-[11px] bg-slate-100 text-slate-500"
               >
                  ⏳ {timeLeft}
               </div>
@@ -1311,75 +1821,41 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, use
           <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
-            className="p-3 bg-accent/5 rounded-xl border border-accent/20 flex flex-col gap-2 overflow-hidden"
+            className="p-3.5 bg-accent/5 rounded-2xl border border-accent/20 flex flex-col gap-2 overflow-hidden"
           >
             <div className="flex items-center gap-3">
-              <div className="p-1.5 bg-accent text-white rounded-lg animate-pulse">
+              <div className="p-1.5 bg-accent text-white rounded-lg animate-pulse shadow-lg shadow-accent/20">
                 <Sparkles size={14} />
               </div>
               <p className="text-xs font-black text-accent">{etaPrediction}</p>
             </div>
-
-            {/* Prediction vs Actual comparison */}
-            {order.status === 'הושלם' && order.completedAt && order.predictedMinutes && (
-              <div className="mt-2 pt-2 border-t border-accent/10 flex items-center justify-between text-[10px] font-bold">
-                <div className="flex items-center gap-1.5 text-slate-500">
-                  <div className="w-2 h-2 rounded-full bg-slate-300" />
-                  <span>חזוי: {order.predictedMinutes} דק'</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-emerald-600">
-                  <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                  <span>בפועל: {Math.round((order.completedAt - order.createdAt) / 60000)} דק'</span>
-                </div>
-                <div className={`px-2 py-0.5 rounded ${
-                  Math.abs(order.predictedMinutes - Math.round((order.completedAt - order.createdAt) / 60000)) <= 10 
-                  ? 'bg-emerald-100 text-emerald-700' 
-                  : 'bg-amber-100 text-amber-700'
-                }`}>
-                  דיוק: {100 - Math.min(100, Math.round(Math.abs(order.predictedMinutes - Math.round((order.completedAt - order.createdAt) / 60000)) / order.predictedMinutes * 100))}%
-                </div>
-              </div>
-            )}
           </motion.div>
         )}
 
-        <div className="flex gap-2">
-          <button 
-            disabled={isPredicting}
-            onClick={handleSmartPredict}
-            className="flex-1 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-white hover:border-accent hover:text-accent transition-all disabled:opacity-50"
-          >
-            {isPredicting ? (
-              <>
-                <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-                <span>מחשב...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles size={14} />
-                <span>חזוי זמן הגעה</span>
-              </>
-            )}
-          </button>
-          
-          <button 
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle();
-            }}
-            className="flex-[2] py-3 bg-white border-2 rounded-xl font-black text-sm transition-all active:scale-95"
-            style={{ borderColor: theme.color, color: theme.color }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = theme.color;
-              e.currentTarget.style.color = 'white';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = 'white';
-              e.currentTarget.style.color = theme.color;
-            }}
-          >
-            {order.status === 'ממתין' ? 'התחל הפצה' : 'עדכון סטטוס'}
-          </button>
+        {/* Quick Actions (Mobile First) */}
+        <div className="grid grid-cols-3 gap-2 pt-2">
+            <button 
+              onClick={(e) => { e.stopPropagation(); onToggle(); }}
+              className="flex flex-col items-center justify-center py-2.5 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all active:scale-95 gap-1 shadow-sm"
+            >
+              <Navigation size={18} className="text-primary" />
+              <span className="text-[10px] font-black text-slate-500">סטטוס</span>
+            </button>
+            <button 
+              onClick={handleSmartPredict}
+              disabled={isPredicting}
+              className="flex flex-col items-center justify-center py-2.5 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all active:scale-95 gap-1 shadow-sm disabled:opacity-50"
+            >
+              <Sparkles size={18} className="text-accent" />
+              <span className="text-[10px] font-black text-slate-500">AI ETA</span>
+            </button>
+            <button 
+              onClick={(e) => { e.stopPropagation(); onShare(); }}
+              className="flex flex-col items-center justify-center py-2.5 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all active:scale-95 gap-1 shadow-sm"
+            >
+              <Share2 size={18} className="text-emerald-500" />
+              <span className="text-[10px] font-black text-slate-500">שיתוף</span>
+            </button>
         </div>
       </div>
     </motion.div>

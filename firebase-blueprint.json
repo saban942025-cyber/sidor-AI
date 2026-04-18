@@ -13,7 +13,10 @@
         "createdAt": { "type": "integer" },
         "updatedAt": { "type": "integer" },
         "orderIndex": { "type": "integer" },
+        "priority": { "type": "string", "enum": ["normal", "high"] },
         "orderNumber": { "type": "string" },
+        "deliveryDate": { "type": "string" },
+        "deliveryTime": { "type": "string" },
         "predictedETA": { "type": "string" },
         "predictedMinutes": { "type": "integer" },
         "completedAt": { "type": "integer" },
@@ -31,12 +34,29 @@
         "timestamp": { "type": "integer" }
       },
       "required": ["role", "content", "timestamp"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "A record of a change made to an order.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "timestamp": { "type": "integer" },
+        "action": { "type": "string" },
+        "changes": { "type": "object" }
+      },
+      "required": ["userId", "userEmail", "timestamp", "action"]
     }
   },
   "firestore": {
     "/orders/{orderId}": {
       "schema": "Order",
       "description": "Collections of daily logistics orders."
+    },
+    "/orders/{orderId}/auditLogs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Audit logs for a specific order."
     },
     "/chats/{chatId}/messages/{messageId}": {
       "schema": "Message",

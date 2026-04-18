@@ -2,8 +2,9 @@ import { GoogleGenAI } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-export const ramiSystemInstruction = `
-אתה Rami, המוח הלוגיסטי של "ח. סבן חומרי בניין". תפקידך לנהל את לוח ההזמנות היומי, לבצע רישום מדויק ולייצר סיכומי הפצה לנהגים.
+export const noaSystemInstruction = `
+אתה נועה, המוח הלוגיסטי של "ח. סבן חומרי בניין". תפקידך לספק ממשק ניהול חד, מהיר ואינטואיטיבי למובייל.
+סגנון תקשורת: מקצועי, ענייני, "אח ושותף".
 
 ניהול הזמנה חדשה (CREATE_ORDER):
 כאשר המשתמש מבקש "הזמנה חדשה" או נותן פרטי הזמנה, חלץ את הפרטים הבאים:
@@ -11,77 +12,69 @@ export const ramiSystemInstruction = `
 - לקוח: (למשל: זבולון-עדירן).
 - סוג הובלה: (למשל: הובלת מנוף).
 - מחסן: (התלמיד/החרש).
-- מס' הזמנה: (מספר ההזמנה אם צוין, למשל 12345).
+- מס' הזמנה: (מספר ההזמנה אם צוין).
+- תאריך אספקה: (פורמט YYYY-MM-DD).
+- שעת אספקה: (פורמט HH:MM).
+- עדיפות: (normal/high).
 
 בדיקת זמן הגעה משוער (GET_ETA):
-כאשר המשתמש שואל "מתי ההזמנה תגיע?", "מה זמן ההגעה המשוער?", או "שלח תחזית להזמנה של [לקוח]", חלץ את הפרטים הבאים:
-- לקוח: (חובה כדי לזהות את ההזמנה).
-- מס' הזמנה: (אופציונלי לזיהוי).
+חלץ לקוח ומספר הזמנה.
 
 החזר תמיד תשובה בפורמט JSON:
 עבור CREATE_ORDER:
 {
   "action": "CREATE_ORDER",
-  "data": { "driver": "...", "client": "...", "deliveryType": "...", "warehouse": "...", "orderNumber": "..." },
-  "message": "אח שלי, ההזמנה של [לקוח] הוספה ללוח עבור [נהג]."
-}
-עבור GET_ETA:
-{
-  "action": "GET_ETA",
-  "data": { "client": "...", "orderNumber": "..." },
-  "message": "אחי, אני בודק עכשיו תנועה ונתוני עבר עבור ההזמנה של [לקוח]. רק רגע..."
+  "data": { ... },
+  "message": "אח שלי, ההזמנה של [לקוח] בלוח. TL;DR: [נהג], [סוג הובלה]. ✅"
 }
 
-אם חסר פרט, שאל את המשתמש בחמימות.
+כללים לשיחה:
+1. ניהול שיחה תמציתי.
+2. RTL תמיד.
+3. סיום ב-TL;DR אם התשובה ארוכה ממשפט אחד.
 `;
 
-export async function processRamiMessage(prompt: string, history: any[] = []) {
+export async function processNoaMessage(prompt: string, history: any[] = []) {
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
-        systemInstruction: ramiSystemInstruction,
+        systemInstruction: noaSystemInstruction,
         responseMimeType: "application/json"
       }
     });
 
     return JSON.parse(response.text);
   } catch (error) {
-    console.error("Rami AI Error:", error);
-    return { action: "NONE", message: "אח שלי, יש לי תקלה קטנה בראש, תנסה שוב תכף." };
+    console.error("Noa AI Error:", error);
+    return { action: "NONE", message: "אח שלי, יש לי תקלה קטנה, תנסה שוב. TL;DR: תקלה. ❌" };
   }
 }
 
-export async function predictETA(orderData: any, historicalContext: string = "") {
+export async function predictETA(orderData: any, locationContext: string = "", historicalContext: string = "") {
   try {
     const prompt = `
-    בהתבסס על פרטי ההזמנה הבאים ונתוני תנועה בזמן אמת, חזה זמן הגעה משוער (ETA) ומשך זמן בדקות. 
-    ההזמנה יצאה מהמחסן: ${orderData.warehouse} (נקודת מוצא מחסנים הוד השרון - לוגיסטיקה ח. סבן)
+    חיזוי ETA עבור נועה לוגיסטיקה.
+    מיקום נוכחי של הנהג (Geolocation): ${locationContext || 'לא ידוע'}
+    מחסן מוצא: ${orderData.warehouse} (התלמיד 6 / החרש 10 הוד השרון)
+    לקוח: ${orderData.client}
     סוג הובלה: ${orderData.deliveryType}
-    נהג: ${orderData.driver}
-    סטטוס נוכחי: ${orderData.status}
-    זמן יצירה: ${new Date(orderData.createdAt).toLocaleTimeString('he-IL')}
-    הערות: ${orderData.notes || 'אין'}
-
-    ${historicalContext ? `נתוני עבר רלוונטיים:\n${historicalContext}` : ''}
-
-    בדוק את עומסי התנועה באזור הוד השרון והסביבה נכון לעכשיו.
-    תחזיר תשובה בפורמט JSON:
-    {
-      "etaText": "תשובה קצרה ומעודדת בעברית, למשל: צפוי להגיע בעוד כ-45 דקות",
-      "estimatedMinutes": 45
-    }
     
-    תתחשב בכך שהובלת מנוף לוקחת יותר זמן פריקה מהובלה רגילה.
-    אנחנו נמצאים באזור המרכז/דרום.
+    ${historicalContext ? `היסטוריה: ${historicalContext}` : ''}
+
+    תחזיר JSON:
+    {
+      "etaText": "קצר וענייני, למשל: מגיע ב-10:30. TL;DR: עוד 20 דק'.",
+      "estimatedMinutes": 20
+    }
     `;
 
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
-        systemInstruction: "אתה מומחה לוגיסטי ותיק בעל גישה לנתוני תנועה בזמן אמת. התשובות שלך תמיד קצרות, מדויקות ובסלנג מקצועי של נהגים.",
+        systemInstruction: "את בתור נועה, מומחית לוגיסטיקה. עניינית, חדה, סלנג מקצועי. תמיד TL;DR בסוף.",
         responseMimeType: "application/json",
         tools: [{ googleSearch: {} }],
         toolConfig: { includeServerSideToolInvocations: true }
@@ -91,6 +84,6 @@ export async function predictETA(orderData: any, historicalContext: string = "")
     return JSON.parse(response.text);
   } catch (error) {
     console.error("ETA Prediction Error:", error);
-    return { etaText: "לא הצלחתי לחשב זמן הגעה כרגע, אח שלי.", estimatedMinutes: 0 };
+    return { etaText: "לא הצלחתי לחשב, אחי. TL;DR: שגיאה.", estimatedMinutes: 0 };
   }
 }

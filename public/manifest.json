@@ -1,0 +1,20 @@
+{
+  "short_name": "נועה",
+  "name": "נועה - המוח הלוגיסטי",
+  "icons": [
+    {
+      "src": "https://picsum.photos/seed/noa/192/192",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "https://picsum.photos/seed/noa/512/512",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#1d4ed8",
+  "background_color": "#ffffff"
+}
