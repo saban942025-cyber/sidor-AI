@@ -28,7 +28,8 @@ import {
   Filter as FilterIcon,
   Construction,
   Package,
-  Layers
+  Layers,
+  Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -87,6 +88,7 @@ interface Order {
   status: OrderStatus;
   createdAt: number;
   orderIndex: number;
+  orderNumber?: string;
   deadline?: number;
   notes?: string;
 }
@@ -146,6 +148,7 @@ export default function App() {
   const [filterDriver, setFilterDriver] = useState<Driver | 'הכל'>('הכל');
   const [filterWarehouse, setFilterWarehouse] = useState<WarehouseLocation | 'הכל'>('הכל');
   const [filterStatus, setFilterStatus] = useState<OrderStatus | 'הכל'>('הכל');
+  const [filterOrderNumber, setFilterOrderNumber] = useState('');
 
   // Auth & Connection Testing
   useEffect(() => {
@@ -187,6 +190,17 @@ export default function App() {
       // Sort in memory to ensure perfect order if some docs are missing orderIndex in DB
       const sorted = [...ordersData].sort((a, b) => b.orderIndex - a.orderIndex);
       setOrders(sorted);
+    }, (error) => {
+      console.error("Orders sync failed (likely index missing):", error);
+      // Simple fallback without orderBy to prevent empty grid
+      const fallbackQ = query(collection(db, 'orders'));
+      onSnapshot(fallbackQ, (fallbackSnapshot) => {
+        const fallbackData = fallbackSnapshot.docs.map(doc => {
+          const data = doc.data();
+          return { id: doc.id, ...data, orderIndex: data.orderIndex ?? data.createdAt ?? Date.now() };
+        }) as Order[];
+        setOrders([...fallbackData].sort((a, b) => b.orderIndex - a.orderIndex));
+      });
     });
 
     return () => unsubscribe();
@@ -232,13 +246,14 @@ export default function App() {
     driver: 'חכמת',
     warehouse: 'התלמיד',
     status: 'ממתין',
+    orderNumber: '',
     notes: ''
   });
 
   const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) {
-      alert("אחי, אתה חייב להתחבר כדי להוסיף הזמנות.");
+      login();
       return;
     }
     if (!manualOrder.client || !manualOrder.deliveryType) {
@@ -251,6 +266,7 @@ export default function App() {
       await addDoc(collection(db, 'orders'), {
         driver: manualOrder.driver,
         client: manualOrder.client,
+        orderNumber: manualOrder.orderNumber || '',
         deliveryType: manualOrder.deliveryType,
         warehouse: manualOrder.warehouse,
         notes: manualOrder.notes || '',
@@ -260,7 +276,7 @@ export default function App() {
         orderIndex: Date.now()
       });
       setIsManualModalOpen(false);
-      setManualOrder({ driver: 'חכמת', warehouse: 'התלמיד', status: 'ממתין', notes: '' });
+      setManualOrder({ driver: 'חכמת', warehouse: 'התלמיד', status: 'ממתין', orderNumber: '', notes: '' });
       playAlert();
     } catch (error) {
       console.error("Failed to add order:", error);
@@ -327,9 +343,10 @@ export default function App() {
       const matchDriver = filterDriver === 'הכל' || order.driver === filterDriver;
       const matchWarehouse = filterWarehouse === 'הכל' || order.warehouse === filterWarehouse;
       const matchStatus = filterStatus === 'הכל' || order.status === filterStatus;
-      return matchDriver && matchWarehouse && matchStatus;
+      const matchOrderNumber = !filterOrderNumber || order.orderNumber?.toLowerCase().includes(filterOrderNumber.toLowerCase());
+      return matchDriver && matchWarehouse && matchStatus && matchOrderNumber;
     });
-  }, [orders, filterDriver, filterWarehouse, filterStatus]);
+  }, [orders, filterDriver, filterWarehouse, filterStatus, filterOrderNumber]);
 
   // Sound Notification Function
   const playAlert = () => {
@@ -383,6 +400,7 @@ export default function App() {
           client: response.data.client || 'לקוח חדש',
           deliveryType: response.data.deliveryType || 'הובלה רגילה',
           warehouse: response.data.warehouse || 'התלמיד',
+          orderNumber: response.data.orderNumber || '',
           status: 'ממתין',
           createdAt: Date.now(),
           updatedAt: Date.now(),
@@ -592,12 +610,29 @@ export default function App() {
               statusThemes={statusThemes}
             />
 
-            {(filterDriver !== 'הכל' || filterWarehouse !== 'הכל' || filterStatus !== 'הכל') && (
+            <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 focus-within:ring-2 focus-within:ring-accent/20 transition-all flex-1 min-w-[150px]">
+              <Hash size={14} className="text-slate-400" />
+              <input 
+                type="text"
+                placeholder="חפש מס' הזמנה..."
+                className="bg-transparent border-none focus:ring-0 text-xs font-bold w-full p-0"
+                value={filterOrderNumber}
+                onChange={(e) => setFilterOrderNumber(e.target.value)}
+              />
+              {filterOrderNumber && (
+                <button onClick={() => setFilterOrderNumber('')} className="text-slate-400 hover:text-slate-600 transition-colors">
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            {(filterDriver !== 'הכל' || filterWarehouse !== 'הכל' || filterStatus !== 'הכל' || filterOrderNumber !== '') && (
               <button 
                 onClick={() => {
                   setFilterDriver('הכל');
                   setFilterWarehouse('הכל');
                   setFilterStatus('הכל');
+                  setFilterOrderNumber('');
                 }}
                 className="text-xs font-bold text-rose-500 hover:text-rose-700 transition-colors underline decoration-dotted"
               >
@@ -697,7 +732,19 @@ export default function App() {
                     </select>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs font-bold text-slate-400 uppercase">מחסן</label>
+                    <label className="text-xs font-bold text-slate-400 uppercase">מס' הזמנה</label>
+                    <input 
+                      type="text"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500/20 shadow-sm font-mono"
+                      placeholder="אופציונלי"
+                      value={manualOrder.orderNumber || ''}
+                      onChange={e => setManualOrder({...manualOrder, orderNumber: e.target.value})}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">מחסן מקור</label>
                     <select 
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500/20 shadow-sm"
                       value={manualOrder.warehouse}
@@ -707,17 +754,17 @@ export default function App() {
                       <option value="החרש">החרש</option>
                     </select>
                   </div>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-400 uppercase">שם לקוח</label>
-                  <input 
-                    type="text" 
-                    required
-                    value={manualOrder.client || ''}
-                    placeholder="למשל: זבולון-עדירן"
-                    className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500/20 shadow-sm"
-                    onChange={e => setManualOrder({...manualOrder, client: e.target.value})}
-                  />
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-400 uppercase">שם לקוח</label>
+                    <input 
+                      type="text" 
+                      required
+                      value={manualOrder.client || ''}
+                      placeholder="למשל: זבולון-עדירן"
+                      className="w-full bg-white border border-slate-200 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500/20 shadow-sm"
+                      onChange={e => setManualOrder({...manualOrder, client: e.target.value})}
+                    />
+                  </div>
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs font-bold text-slate-400 uppercase">סוג הובלה</label>
@@ -741,11 +788,17 @@ export default function App() {
                   />
                 </div>
                 <button 
-                  type="submit"
-                  disabled={isSubmitting || !user}
+                  type={user ? "submit" : "button"}
+                  onClick={!user ? login : undefined}
+                  disabled={isSubmitting}
                   className="w-full py-4 bg-orange-600 hover:bg-orange-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-2xl font-black text-lg shadow-lg shadow-orange-600/20 transition-all active:scale-95 flex items-center justify-center gap-2"
                 >
-                  {isSubmitting ? 'שומר הזמנה...' : user ? 'הוסף לסידור העבודה' : 'התחבר כדי להוסיף'}
+                  {isSubmitting ? 'שומר הזמנה...' : user ? 'הוסף לסידור העבודה' : (
+                    <>
+                      <LogIn size={20} />
+                      <span>התחבר כדי להוסיף</span>
+                    </>
+                  )}
                 </button>
               </form>
             </motion.div>
@@ -956,6 +1009,8 @@ const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes }: { or
 
 const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: { order: Order; onToggle: () => void; onClick: () => void; statusThemes: Record<OrderStatus, StatusTheme>, dragProps?: any }) => {
   const [timeLeft, setTimeLeft] = useState('00:00:00');
+  const [isPredicting, setIsPredicting] = useState(false);
+  const [etaPrediction, setEtaPrediction] = useState<string | null>(null);
   
   useEffect(() => {
     const updateTimer = () => {
@@ -970,6 +1025,21 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
     const timer = setInterval(updateTimer, 1000);
     return () => clearInterval(timer);
   }, [order.createdAt]);
+
+  const handlePredictETA = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsPredicting(true);
+    try {
+      const { predictETA } = await import('./lib/gemini');
+      const result = await predictETA(order);
+      setEtaPrediction(result);
+    } catch (error) {
+      console.error("ETA Prediction Error:", error);
+      setEtaPrediction("תקלה בחיזוי");
+    } finally {
+      setIsPredicting(false);
+    }
+  };
 
   const theme = statusThemes[order.status];
 
@@ -1015,7 +1085,14 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
             {getDeliveryIcon()}
           </div>
           <div className="flex-1 min-w-0">
-            <div className="font-extrabold text-lg tracking-tight truncate">{order.client}</div>
+            <div className="flex items-center gap-2 mb-1">
+              <div className="font-extrabold text-lg tracking-tight truncate">{order.client}</div>
+              {order.orderNumber && (
+                <div className="bg-slate-200 text-slate-700 text-[10px] font-black px-1.5 py-0.5 rounded border border-slate-300">
+                  #{order.orderNumber}
+                </div>
+              )}
+            </div>
             <div className="text-xs text-text-light font-bold flex justify-between mt-1">
               <span>{order.warehouse} | {order.deliveryType}</span>
               <div 
@@ -1028,24 +1105,57 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
           </div>
         </div>
 
-        <button 
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggle();
-          }}
-          className="w-full py-3 bg-white border-2 rounded-xl font-black text-sm transition-all active:scale-95"
-          style={{ borderColor: theme.color, color: theme.color }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = theme.color;
-            e.currentTarget.style.color = 'white';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = 'white';
-            e.currentTarget.style.color = theme.color;
-          }}
-        >
-          {order.status === 'ממתין' ? 'התחל הפצה' : 'עדכון סטטוס'}
-        </button>
+        {etaPrediction && (
+          <motion.div 
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="p-3 bg-accent/5 rounded-xl border border-accent/20 flex items-center gap-3 overflow-hidden"
+          >
+            <div className="p-1.5 bg-accent text-white rounded-lg animate-pulse">
+              <Sparkles size={14} />
+            </div>
+            <p className="text-xs font-black text-accent">{etaPrediction}</p>
+          </motion.div>
+        )}
+
+        <div className="flex gap-2">
+          <button 
+            disabled={isPredicting}
+            onClick={handlePredictETA}
+            className="flex-1 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-white hover:border-accent hover:text-accent transition-all disabled:opacity-50"
+          >
+            {isPredicting ? (
+              <>
+                <div className="w-3 h-3 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                <span>מחשב...</span>
+              </>
+            ) : (
+              <>
+                <Sparkles size={14} />
+                <span>חזוי זמן הגעה</span>
+              </>
+            )}
+          </button>
+          
+          <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
+            }}
+            className="flex-[2] py-3 bg-white border-2 rounded-xl font-black text-sm transition-all active:scale-95"
+            style={{ borderColor: theme.color, color: theme.color }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = theme.color;
+              e.currentTarget.style.color = 'white';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'white';
+              e.currentTarget.style.color = theme.color;
+            }}
+          >
+            {order.status === 'ממתין' ? 'התחל הפצה' : 'עדכון סטטוס'}
+          </button>
+        </div>
       </div>
     </motion.div>
   );

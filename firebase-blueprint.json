@@ -12,9 +12,11 @@
         "status": { "type": "string", "enum": ["ממתין", "בביצוע", "הושלם", "בוטל"] },
         "createdAt": { "type": "integer" },
         "updatedAt": { "type": "integer" },
+        "orderIndex": { "type": "integer" },
+        "orderNumber": { "type": "string" },
         "notes": { "type": "string" }
       },
-      "required": ["driver", "client", "deliveryType", "warehouse", "status", "createdAt"]
+      "required": ["driver", "client", "deliveryType", "warehouse", "status", "createdAt", "orderIndex"]
     },
     "Message": {
       "title": "ChatMessage",
