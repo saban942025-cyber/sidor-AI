@@ -149,9 +149,17 @@ export default function App() {
   const [filterWarehouse, setFilterWarehouse] = useState<WarehouseLocation | 'הכל'>('הכל');
   const [filterStatus, setFilterStatus] = useState<OrderStatus | 'הכל'>('הכל');
   const [filterOrderNumber, setFilterOrderNumber] = useState('');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
 
   // Auth & Connection Testing
   useEffect(() => {
+    (window as any).showGlobalToast = showToast;
+    
     const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
@@ -959,6 +967,19 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div 
+            initial={{ opacity: 0, y: 50, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: 50, x: '-50%' }}
+            className="fixed bottom-10 left-1/2 z-[200] bg-emerald-600 text-white px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 font-bold"
+          >
+            <CheckCircle2 size={18} />
+            <span>{toastMessage}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -1026,13 +1047,16 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
     return () => clearInterval(timer);
   }, [order.createdAt]);
 
-  const handlePredictETA = async (e: React.MouseEvent) => {
+  const handleSmartPredict = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsPredicting(true);
     try {
       const { predictETA } = await import('./lib/gemini');
       const result = await predictETA(order);
       setEtaPrediction(result);
+      if (typeof (window as any).showGlobalToast === 'function') {
+        (window as any).showGlobalToast('התחזית עודכנה בהצלחה! ✨');
+      }
     } catch (error) {
       console.error("ETA Prediction Error:", error);
       setEtaPrediction("תקלה בחיזוי");
@@ -1121,7 +1145,7 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
         <div className="flex gap-2">
           <button 
             disabled={isPredicting}
-            onClick={handlePredictETA}
+            onClick={handleSmartPredict}
             className="flex-1 py-3 bg-slate-50 border border-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-white hover:border-accent hover:text-accent transition-all disabled:opacity-50"
           >
             {isPredicting ? (
