@@ -13,16 +13,26 @@ export const ramiSystemInstruction = `
 - מחסן: (התלמיד/החרש).
 - מס' הזמנה: (מספר ההזמנה אם צוין, למשל 12345).
 
-אם חסר פרט (למעט מס' הזמנה שהוא אופציונלי), שאל את המשתמש בחמימות.
-פנה למשתמש כ"אחי" או "שותף".
+בדיקת זמן הגעה משוער (GET_ETA):
+כאשר המשתמש שואל "מתי ההזמנה תגיע?", "מה זמן ההגעה המשוער?", או "שלח תחזית להזמנה של [לקוח]", חלץ את הפרטים הבאים:
+- לקוח: (חובה כדי לזהות את ההזמנה).
+- מס' הזמנה: (אופציונלי לזיהוי).
 
-החזר תמיד תשובה בפורמט JSON אם זיהית הזמנה:
+החזר תמיד תשובה בפורמט JSON:
+עבור CREATE_ORDER:
 {
   "action": "CREATE_ORDER",
   "data": { "driver": "...", "client": "...", "deliveryType": "...", "warehouse": "...", "orderNumber": "..." },
   "message": "אח שלי, ההזמנה של [לקוח] הוספה ללוח עבור [נהג]."
 }
-אחרת, ענה כצ'אט רגיל ומקצועי.
+עבור GET_ETA:
+{
+  "action": "GET_ETA",
+  "data": { "client": "...", "orderNumber": "..." },
+  "message": "אחי, אני בודק עכשיו תנועה ונתוני עבר עבור ההזמנה של [לקוח]. רק רגע..."
+}
+
+אם חסר פרט, שאל את המשתמש בחמימות.
 `;
 
 export async function processRamiMessage(prompt: string, history: any[] = []) {
@@ -43,33 +53,44 @@ export async function processRamiMessage(prompt: string, history: any[] = []) {
   }
 }
 
-export async function predictETA(orderData: any) {
+export async function predictETA(orderData: any, historicalContext: string = "") {
   try {
     const prompt = `
-    בהתבסס על פרטי ההזמנה הבאים, חזה זמן הגעה משוער (ETA). 
-    ההזמנה יצאה מהמחסן: ${orderData.warehouse}
+    בהתבסס על פרטי ההזמנה הבאים ונתוני תנועה בזמן אמת, חזה זמן הגעה משוער (ETA) ומשך זמן בדקות. 
+    ההזמנה יצאה מהמחסן: ${orderData.warehouse} (נקודת מוצא מחסנים הוד השרון - לוגיסטיקה ח. סבן)
     סוג הובלה: ${orderData.deliveryType}
     נהג: ${orderData.driver}
     סטטוס נוכחי: ${orderData.status}
     זמן יצירה: ${new Date(orderData.createdAt).toLocaleTimeString('he-IL')}
     הערות: ${orderData.notes || 'אין'}
 
-    תחזיר תשובה קצרה ומעודדת בעברית, למשל: "צפוי להגיע בעוד כ-45 דקות" או "הגעה תוך שעה וחצי".
+    ${historicalContext ? `נתוני עבר רלוונטיים:\n${historicalContext}` : ''}
+
+    בדוק את עומסי התנועה באזור הוד השרון והסביבה נכון לעכשיו.
+    תחזיר תשובה בפורמט JSON:
+    {
+      "etaText": "תשובה קצרה ומעודדת בעברית, למשל: צפוי להגיע בעוד כ-45 דקות",
+      "estimatedMinutes": 45
+    }
+    
     תתחשב בכך שהובלת מנוף לוקחת יותר זמן פריקה מהובלה רגילה.
-    אנחנו נמצאים באזור המרכז/דרום (נקודת מוצא מחסנים הוד השרון - לוגיסטיקה ח. סבן).
+    אנחנו נמצאים באזור המרכז/דרום.
     `;
 
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
-        systemInstruction: "אתה מומחה לוגיסטי ותיק. התשובות שלך תמיד קצרות, מדויקות ובסלנג מקצועי של נהגים (\"אח שלי\", \"על הבוקר\", \"טיקטק\").",
+        systemInstruction: "אתה מומחה לוגיסטי ותיק בעל גישה לנתוני תנועה בזמן אמת. התשובות שלך תמיד קצרות, מדויקות ובסלנג מקצועי של נהגים.",
+        responseMimeType: "application/json",
+        tools: [{ googleSearch: {} }],
+        toolConfig: { includeServerSideToolInvocations: true }
       }
     });
 
-    return response.text.trim();
+    return JSON.parse(response.text);
   } catch (error) {
     console.error("ETA Prediction Error:", error);
-    return "לא הצלחתי לחשב זמן הגעה כרגע, אח שלי.";
+    return { etaText: "לא הצלחתי לחשב זמן הגעה כרגע, אח שלי.", estimatedMinutes: 0 };
   }
 }

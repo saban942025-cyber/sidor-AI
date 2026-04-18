@@ -14,6 +14,9 @@
         "updatedAt": { "type": "integer" },
         "orderIndex": { "type": "integer" },
         "orderNumber": { "type": "string" },
+        "predictedETA": { "type": "string" },
+        "predictedMinutes": { "type": "integer" },
+        "completedAt": { "type": "integer" },
         "notes": { "type": "string" }
       },
       "required": ["driver", "client", "deliveryType", "warehouse", "status", "createdAt", "orderIndex"]

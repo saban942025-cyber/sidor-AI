@@ -25,6 +25,7 @@ import {
   Settings,
   Palette,
   GripVertical,
+  Trash2,
   Filter as FilterIcon,
   Construction,
   Package,
@@ -59,6 +60,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  deleteDoc,
   doc, 
   orderBy, 
   getDocFromServer,
@@ -89,6 +91,9 @@ interface Order {
   createdAt: number;
   orderIndex: number;
   orderNumber?: string;
+  predictedETA?: string;
+  predictedMinutes?: number;
+  completedAt?: number;
   deadline?: number;
   notes?: string;
 }
@@ -248,6 +253,7 @@ export default function App() {
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedOrderID, setSelectedOrderID] = useState<string | null>(null);
+  const [isDeletingOrderID, setIsDeletingOrderID] = useState<string | null>(null);
   const selectedOrder = useMemo(() => orders.find(o => o.id === selectedOrderID), [orders, selectedOrderID]);
   
   const [manualOrder, setManualOrder] = useState<Partial<Order>>({
@@ -314,15 +320,36 @@ export default function App() {
     const statuses: OrderStatus[] = ['ממתין', 'בביצוע', 'הושלם', 'בוטל'];
     const nextIndex = (statuses.indexOf(order.status) + 1) % statuses.length;
     
+    const nextStatus = statuses[nextIndex];
+    
     try {
-      await updateDoc(doc(db, 'orders', id), {
-        status: statuses[nextIndex],
+      const updateData: any = {
+        status: nextStatus,
         updatedAt: Date.now()
-      });
+      };
+      
+      if (nextStatus === 'הושלם') {
+        updateData.completedAt = Date.now();
+      }
+      
+      await updateDoc(doc(db, 'orders', id), updateData);
     } catch (error) {
       console.error("Update failed:", error);
     }
   }, [user, orders]);
+
+  const confirmDeleteOrder = async () => {
+    if (!isDeletingOrderID || !user) return;
+    try {
+      await deleteDoc(doc(db, 'orders', isDeletingOrderID));
+      setIsDeletingOrderID(null);
+      setSelectedOrderID(null);
+      showToast('ההזמנה נמחקה לצמיתות 🗑️');
+    } catch (error) {
+      console.error("Delete failed:", error);
+      alert("אח שלי, הייתה בעיה במחיקה.");
+    }
+  };
 
   // WhatsApp Message Generator
   const generateWhatsAppMessage = useCallback(() => {
@@ -415,6 +442,63 @@ export default function App() {
           orderIndex: Date.now()
         });
         playAlert();
+        showToast(`ההזמנה עבור ${response.data.client || 'לקוח חדש'} נוספה בהצלחה! ✅`);
+      }
+
+      // If AI detected an ETA request
+      if (response.action === 'GET_ETA' && response.data) {
+        const clientQuery = response.data.client?.toLowerCase();
+        const orderNumQuery = response.data.orderNumber;
+        
+        const targetOrder = orders.find(o => 
+          (orderNumQuery && o.orderNumber === orderNumQuery) || 
+          (clientQuery && o.client.toLowerCase().includes(clientQuery))
+        );
+
+        if (targetOrder) {
+          try {
+            // Re-use logic for ETA prediction
+            const historyStr = orders
+              .filter(o => o.status === 'הושלם' && o.warehouse === targetOrder.warehouse && o.deliveryType === targetOrder.deliveryType && o.completedAt)
+              .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0))
+              .slice(0, 5)
+              .map(o => {
+                const duration = Math.round(((o.completedAt || 0) - o.createdAt) / 60000);
+                return `- ${o.client}: ${duration} דקות`;
+              })
+              .join('\n');
+
+            const { predictETA } = await import('./lib/gemini');
+            const result = await predictETA(targetOrder, historyStr);
+            
+            // Persist
+            if (user) {
+              await updateDoc(doc(db, 'orders', targetOrder.id), {
+                predictedETA: result.etaText,
+                predictedMinutes: result.estimatedMinutes,
+                updatedAt: Date.now()
+              });
+            }
+
+            const finalMsg: Message = {
+              id: (Date.now() + 3).toString(),
+              role: 'assistant',
+              content: `📊 *סיכום תחזית עבור ${targetOrder.client}:*\n${result.etaText}\n\n(הנתונים עודכנו גם בלוח ההזמנות)`,
+              timestamp: Date.now()
+            };
+            setMessages(prev => [...prev, finalMsg]);
+          } catch (err) {
+            console.error("Chat ETA error:", err);
+          }
+        } else {
+          const notFoundMsg: Message = {
+            id: (Date.now() + 3).toString(),
+            role: 'assistant',
+            content: `אחי, לא מצאתי הזמנה פעילה עבור "${response.data.client || 'הלקוח המבוקש'}". בטוח שהיא קיימת בלוח?`,
+            timestamp: Date.now()
+          };
+          setMessages(prev => [...prev, notFoundMsg]);
+        }
       }
     } catch (error) {
       console.error("AI processing failed:", error);
@@ -666,6 +750,8 @@ export default function App() {
                       onToggle={() => toggleOrderStatus(order.id)} 
                       onClick={() => setSelectedOrderID(order.id)}
                       statusThemes={statusThemes}
+                      orders={orders}
+                      user={user}
                     />
                   ))}
                 </div>
@@ -841,9 +927,20 @@ export default function App() {
                   </div>
                   <h2 className="text-3xl font-black text-text-dark tracking-tight leading-none">{selectedOrder.client}</h2>
                 </div>
-                <button onClick={() => setSelectedOrderID(null)} className="p-2 hover:bg-slate-200 rounded-full transition-colors">
-                  <X size={24} />
-                </button>
+                <div className="flex gap-2">
+                  {user && (
+                    <button 
+                      onClick={() => setIsDeletingOrderID(selectedOrder.id)}
+                      className="p-2 hover:bg-red-50 text-red-200 hover:text-red-500 rounded-full transition-all"
+                      title="מחיקת הזמנה"
+                    >
+                      <Trash2 size={24} />
+                    </button>
+                  )}
+                  <button onClick={() => setSelectedOrderID(null)} className="p-2 hover:bg-slate-200 rounded-full transition-colors">
+                    <X size={24} />
+                  </button>
+                </div>
               </div>
 
               <div className="p-8 space-y-6">
@@ -980,6 +1077,48 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {isDeletingOrderID && (
+          <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsDeletingOrderID(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[32px] shadow-2xl relative z-10 overflow-hidden p-8 text-center"
+            >
+              <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Trash2 size={32} />
+              </div>
+              <h3 className="text-xl font-black text-text-dark mb-2">למחוק את ההזמנה?</h3>
+              <p className="text-text-light text-sm font-bold mb-8">פעולה זו היא סופית ולא ניתן לבטל אותה. ההזמנה תיעלם מהלוח לצמיתות.</p>
+              
+              <div className="flex gap-3">
+                <button 
+                  onClick={confirmDeleteOrder}
+                  className="flex-1 py-3 bg-red-600 text-white rounded-xl font-black text-sm hover:bg-red-700 transition-all active:scale-95"
+                >
+                  כן, מחק
+                </button>
+                <button 
+                  onClick={() => setIsDeletingOrderID(null)}
+                  className="flex-1 py-3 bg-slate-100 text-text-dark rounded-xl font-black text-sm hover:bg-slate-200 transition-all active:scale-95"
+                >
+                  ביטול
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -998,7 +1137,14 @@ const DetailItem = memo(({ icon, label, value }: { icon: any, label: string, val
   );
 });
 
-const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes }: { order: Order; onToggle: () => void; onClick: () => void; statusThemes: Record<OrderStatus, StatusTheme> }) => {
+const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes, orders, user }: { 
+  order: Order; 
+  onToggle: () => void; 
+  onClick: () => void; 
+  statusThemes: Record<OrderStatus, StatusTheme>, 
+  orders: Order[],
+  user: any
+}) => {
   const {
     attributes,
     listeners,
@@ -1022,16 +1168,26 @@ const SortableOrderCard = memo(({ order, onToggle, onClick, statusThemes }: { or
         onToggle={onToggle} 
         onClick={onClick} 
         statusThemes={statusThemes} 
+        allOrders={orders}
+        user={user}
         dragProps={{ ...attributes, ...listeners }}
       />
     </div>
   );
 });
 
-const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: { order: Order; onToggle: () => void; onClick: () => void; statusThemes: Record<OrderStatus, StatusTheme>, dragProps?: any }) => {
+const OrderCard = memo(({ order, onToggle, onClick, statusThemes, allOrders, user, dragProps }: { 
+  order: Order; 
+  onToggle: () => void; 
+  onClick: () => void; 
+  statusThemes: Record<OrderStatus, StatusTheme>; 
+  allOrders: Order[];
+  user: any;
+  dragProps?: any 
+}) => {
   const [timeLeft, setTimeLeft] = useState('00:00:00');
   const [isPredicting, setIsPredicting] = useState(false);
-  const [etaPrediction, setEtaPrediction] = useState<string | null>(null);
+  const [etaPrediction, setEtaPrediction] = useState<string | null>(order.predictedETA || null);
   
   useEffect(() => {
     const updateTimer = () => {
@@ -1051,9 +1207,31 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
     e.stopPropagation();
     setIsPredicting(true);
     try {
+      // Build historical context from last 5 completed orders for same warehouse/deliveryType
+      const history = allOrders
+        .filter(o => o.status === 'הושלם' && o.warehouse === order.warehouse && o.deliveryType === order.deliveryType && o.completedAt)
+        .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0))
+        .slice(0, 5)
+        .map(o => {
+          const duration = Math.round(((o.completedAt || 0) - o.createdAt) / 60000);
+          return `- ${o.client}: ${duration} דקות (${new Date(o.createdAt).toLocaleDateString()})`;
+        })
+        .join('\n');
+
       const { predictETA } = await import('./lib/gemini');
-      const result = await predictETA(order);
-      setEtaPrediction(result);
+      const result = await predictETA(order, history);
+      
+      setEtaPrediction(result.etaText);
+      
+      // Persist to DB
+      if (user) {
+        await updateDoc(doc(db, 'orders', order.id), {
+          predictedETA: result.etaText,
+          predictedMinutes: result.estimatedMinutes,
+          updatedAt: Date.now()
+        });
+      }
+
       if (typeof (window as any).showGlobalToast === 'function') {
         (window as any).showGlobalToast('התחזית עודכנה בהצלחה! ✨');
       }
@@ -1133,12 +1311,35 @@ const OrderCard = memo(({ order, onToggle, onClick, statusThemes, dragProps }: {
           <motion.div 
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
-            className="p-3 bg-accent/5 rounded-xl border border-accent/20 flex items-center gap-3 overflow-hidden"
+            className="p-3 bg-accent/5 rounded-xl border border-accent/20 flex flex-col gap-2 overflow-hidden"
           >
-            <div className="p-1.5 bg-accent text-white rounded-lg animate-pulse">
-              <Sparkles size={14} />
+            <div className="flex items-center gap-3">
+              <div className="p-1.5 bg-accent text-white rounded-lg animate-pulse">
+                <Sparkles size={14} />
+              </div>
+              <p className="text-xs font-black text-accent">{etaPrediction}</p>
             </div>
-            <p className="text-xs font-black text-accent">{etaPrediction}</p>
+
+            {/* Prediction vs Actual comparison */}
+            {order.status === 'הושלם' && order.completedAt && order.predictedMinutes && (
+              <div className="mt-2 pt-2 border-t border-accent/10 flex items-center justify-between text-[10px] font-bold">
+                <div className="flex items-center gap-1.5 text-slate-500">
+                  <div className="w-2 h-2 rounded-full bg-slate-300" />
+                  <span>חזוי: {order.predictedMinutes} דק'</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-emerald-600">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <span>בפועל: {Math.round((order.completedAt - order.createdAt) / 60000)} דק'</span>
+                </div>
+                <div className={`px-2 py-0.5 rounded ${
+                  Math.abs(order.predictedMinutes - Math.round((order.completedAt - order.createdAt) / 60000)) <= 10 
+                  ? 'bg-emerald-100 text-emerald-700' 
+                  : 'bg-amber-100 text-amber-700'
+                }`}>
+                  דיוק: {100 - Math.min(100, Math.round(Math.abs(order.predictedMinutes - Math.round((order.completedAt - order.createdAt) / 60000)) / order.predictedMinutes * 100))}%
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
 
