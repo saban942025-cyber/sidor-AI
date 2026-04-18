@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isValidOrder(data) {
+      return data.driver in ['חכמת', 'עלי'] &&
+             data.client is string && data.client.size() <= 200 &&
+             data.deliveryType is string && data.deliveryType.size() <= 200 &&
+             data.warehouse in ['התלמיד', 'החרש'] &&
+             data.status in ['ממתין', 'בביצוע', 'הושלם', 'בוטל'] &&
+             data.createdAt is int;
+    }
+
+    // Orders Collection
+    match /orders/{orderId} {
+      allow read: if true; // Publicly readable for drivers (can be hardened later with auth)
+      allow create: if isSignedIn() && isValidOrder(request.resource.data);
+      allow update: if isSignedIn() && isValidOrder(request.resource.data);
+      allow delete: if isSignedIn();
+    }
+
+    // Chat messages
+    match /chats/{chatId}/messages/{messageId} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}

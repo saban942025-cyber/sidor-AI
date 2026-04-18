@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "A logistics order for H. Saban Building Materials.",
+      "type": "object",
+      "properties": {
+        "driver": { "type": "string", "enum": ["חכמת", "עלי"] },
+        "client": { "type": "string" },
+        "deliveryType": { "type": "string" },
+        "warehouse": { "type": "string", "enum": ["התלמיד", "החרש"] },
+        "status": { "type": "string", "enum": ["ממתין", "בביצוע", "הושלם", "בוטל"] },
+        "createdAt": { "type": "integer" },
+        "updatedAt": { "type": "integer" },
+        "notes": { "type": "string" }
+      },
+      "required": ["driver", "client", "deliveryType", "warehouse", "status", "createdAt"]
+    },
+    "Message": {
+      "title": "ChatMessage",
+      "description": "A message in the AI chat with Rami.",
+      "type": "object",
+      "properties": {
+        "role": { "type": "string", "enum": ["user", "assistant"] },
+        "content": { "type": "string" },
+        "timestamp": { "type": "integer" }
+      },
+      "required": ["role", "content", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Collections of daily logistics orders."
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Messages for a specific chat session."
+    }
+  }
+}

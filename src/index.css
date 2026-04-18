@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #1e3a8a;
+  --color-accent: #f59e0b;
+  --color-surface-bg: #f8fafc;
+  --color-surface-card: #ffffff;
+  --color-surface-border: #e2e8f0;
+  --color-text-dark: #0f172a;
+  --color-text-light: #64748b;
+  --color-status-success: #10b981;
+  --color-status-alert: #ef4444;
+  
+  --font-sans: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-surface-bg text-text-dark font-sans;
+  }
+}
